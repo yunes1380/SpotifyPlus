@@ -153,13 +153,12 @@ public class RemoveCreateButtonHook extends SpotifyHook {
                 }
             });
 
-            var modifyDataListClass = bridge.findClass(FindClass.create().matcher(ClassMatcher.create()
-                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).interfaceCount(1).methodCount(3)
-                    .fields(FieldsMatcher.create()
-                            .count(4)
-                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).type(int.class))
-                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(int.class))
-                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(Object[].class)))));
+            var modifyDataListClass = findDrawerMutationClasses();
+            if (modifyDataListClass.isEmpty()) {
+                XposedBridge.log("[SpotifyPlus] Side-drawer mutation class not found with any matcher (9.1.84+ tolerant search failed). Installing view-tree fallback.");
+                installSettingsFallback();
+                return;
+            }
 
             // var things =
             // bridge.findClass(FindClass.create().matcher(ClassMatcher.create().modifiers(Modifier.PUBLIC
@@ -180,20 +179,42 @@ public class RemoveCreateButtonHook extends SpotifyHook {
             // things.forEach(x -> XposedBridge.log("[SpotifyPlus] " +
             // x.getDeclaredClassName()));
 
-            var methodsThing = bridge.findMethod(FindMethod.create().searchInClass(modifyDataListClass)
-                    .matcher(MethodMatcher.create().returnType(Object.class).modifiers(Modifier.PUBLIC | Modifier.FINAL)
-                            .paramCount(1).paramTypes(Object.class)));
+            var methodsThing = findDrawerMutationMethods(modifyDataListClass);
             List<Method> invokeSuspendMethods = new ArrayList<>();
             for (var methodData : methodsThing) {
-                Method method = methodData.getMethodInstance(lpparm.classLoader);
-                if (!invokeSuspendMethods.contains(method)) invokeSuspendMethods.add(method);
+                try {
+                    Method method = methodData.getMethodInstance(lpparm.classLoader);
+                    if (!invokeSuspendMethods.contains(method)) invokeSuspendMethods.add(method);
+                } catch (Throwable t) {
+                    XposedBridge.log("[SpotifyPlus] Could not load drawer mutation method: " + t);
+                }
+            }
+            // 9.1.84 fallback: if DexKit method query fails, hook by reflection (public final Object *(Object))
+            if (invokeSuspendMethods.isEmpty()) {
+                XposedBridge.log("[SpotifyPlus] DexKit method query empty, trying reflection fallback for 9.1.84+");
+                for (var classData : modifyDataListClass) {
+                    try {
+                        Class<?> c = classData.getInstance(lpparm.classLoader);
+                        for (Method m : c.getDeclaredMethods()) {
+                            if (m.getParameterCount() == 1 && m.getParameterTypes()[0] == Object.class
+                                    && m.getReturnType() == Object.class
+                                    && Modifier.isPublic(m.getModifiers()) && Modifier.isFinal(m.getModifiers())) {
+                                m.setAccessible(true);
+                                if (!invokeSuspendMethods.contains(m)) invokeSuspendMethods.add(m);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log("[SpotifyPlus] Reflection fallback failed: " + t);
+                    }
+                }
             }
             XposedBridge.log("[SpotifyPlus] Side-drawer array mutation candidates: " + invokeSuspendMethods.stream().map(method -> method.getDeclaringClass().getName() + "#" + method.getName()).collect(java.util.stream.Collectors.joining(", ")));
 
             // Identify the destination in the live array before cloning. The wrapper,
             // navigation props and instrumentation have changed independently of it.
             if (invokeSuspendMethods.isEmpty()) {
-                XposedBridge.log("[SpotifyPlus] No side-drawer array callback matched");
+                XposedBridge.log("[SpotifyPlus] No side-drawer array callback matched, installing view-tree fallback");
+                installSettingsFallback();
                 return;
             }
 
@@ -204,11 +225,11 @@ public class RemoveCreateButtonHook extends SpotifyHook {
                     // bridge.findField(FindField.create().searchInClass(modifyDataListClass).matcher(FieldMatcher.create().modifiers(Modifier.PUBLIC
                     // |
                     // Modifier.FINAL).type(int.class))).get(0).getFieldInstance(lpparm.classLoader);
-                    Field d = bridge
-                            .findField(FindField.create()
-                                    .searchInClass(Collections.singletonList(bridge.getClassData(param.thisObject.getClass())))
-                                    .matcher(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(Object[].class)))
-                            .get(0).getFieldInstance(lpparm.classLoader);
+                    Field d = findObjectArrayField(param.thisObject.getClass());
+                    if (d == null) {
+                        XposedBridge.log("[SpotifyPlus] No Object[] field in " + param.thisObject.getClass().getName());
+                        return;
+                    }
 
                     // int number = a.getInt(param.thisObject);
                     // if(number != 20) return;
@@ -220,13 +241,16 @@ public class RemoveCreateButtonHook extends SpotifyHook {
                             .toArray(Object[]::new);
 
                     // This should work in theory. Spotify seems to keep changing the amount of
-                    // buttons, sooo
-                    if (originalItems.length < 4) return;
-                    if (Arrays.stream(originalItems).anyMatch(item -> containsDrawerDestination(item, 4, new IdentityHashMap<>(), "spotify:null"))) return;
+                    // buttons, sooo. 9.1.84+: allow smaller drawers (was <4, now <2).
+                    if (originalItems.length < 2) return;
+                    if (Arrays.stream(originalItems).anyMatch(item -> containsDrawerDestination(item, 6, new IdentityHashMap<>(), "spotify:null"))) return;
                     Class<?> runtimeButtonClass = originalItems[0].getClass();
                     if (Arrays.stream(originalItems).anyMatch(item -> !runtimeButtonClass.isInstance(item))) return;
                     int settingsItemIndex = findSettingsItemIndex(originalItems);
-                    if (settingsItemIndex < 0) return;
+                    if (settingsItemIndex < 0) {
+                        XposedBridge.log("[SpotifyPlus] Settings row not found in drawer (" + originalItems.length + " items). Destinations: " + collectDrawerDestinations(originalItems));
+                        return;
+                    }
                     int customItemIndex = settingsItemIndex + 1;
                     Object tempalte = originalItems[settingsItemIndex];
                     Object runtimeSideDrawerItem = findDirectChildContainingSettings(tempalte);
@@ -1057,19 +1081,240 @@ public class RemoveCreateButtonHook extends SpotifyHook {
         }
     }
 
+    // 9.1.84+ tolerant drawer-class search. Exact matcher first, then looser fallbacks.
+    private ClassDataList findDrawerMutationClasses() {
+        // Exact (pre-9.1.84)
+        try {
+            var exact = bridge.findClass(FindClass.create().matcher(ClassMatcher.create()
+                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).interfaceCount(1).methodCount(3)
+                    .fields(FieldsMatcher.create()
+                            .count(4)
+                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).type(int.class))
+                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(int.class))
+                            .add(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(Object[].class)))));
+            if (!exact.isEmpty()) {
+                XposedBridge.log("[SpotifyPlus] Drawer matcher: exact hit (" + exact.size() + ")");
+                return exact;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Drawer exact matcher failed: " + t);
+        }
+        // Loose: PUBLIC|FINAL, 1 interface, must contain Object[] + int (no strict counts for 9.1.84+)
+        try {
+            var loose = bridge.findClass(FindClass.create().matcher(ClassMatcher.create()
+                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).interfaceCount(1)
+                    .fields(FieldsMatcher.create()
+                            .add(FieldMatcher.create().type(Object[].class))
+                            .add(FieldMatcher.create().type(int.class)))));
+            if (!loose.isEmpty()) {
+                XposedBridge.log("[SpotifyPlus] Drawer matcher: loose hit (" + loose.size() + ")");
+                return loose;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Drawer loose matcher failed: " + t);
+        }
+        // Loosest: any PUBLIC|FINAL class with Object[] field
+        try {
+            var loosest = bridge.findClass(FindClass.create().matcher(ClassMatcher.create()
+                    .modifiers(Modifier.PUBLIC | Modifier.FINAL)
+                    .fields(FieldsMatcher.create().add(FieldMatcher.create().type(Object[].class)))));
+            XposedBridge.log("[SpotifyPlus] Drawer matcher: loosest candidates (" + loosest.size() + ")");
+            // Filter to those with 1 interface to avoid false positives
+            ClassDataList filtered = new ClassDataList();
+            for (var c : loosest) {
+                try {
+                    Class<?> cl = c.getInstance(lpparm.classLoader);
+                    if (cl.getInterfaces().length == 1) filtered.add(c);
+                } catch (Throwable ignored) {}
+            }
+            if (!filtered.isEmpty()) {
+                XposedBridge.log("[SpotifyPlus] Drawer matcher: loosest filtered (" + filtered.size() + ")");
+                return filtered;
+            }
+            return loosest;
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Drawer loosest matcher failed: " + t);
+        }
+        return new ClassDataList();
+    }
+
+    private org.luckypray.dexkit.result.MethodDataList findDrawerMutationMethods(ClassDataList classes) {
+        try {
+            var res = bridge.findMethod(FindMethod.create().searchInClass(classes)
+                    .matcher(MethodMatcher.create().returnType(Object.class).modifiers(Modifier.PUBLIC | Modifier.FINAL)
+                            .paramCount(1).paramTypes(Object.class)));
+            if (!res.isEmpty()) return res;
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Drawer method exact query failed: " + t);
+        }
+        // Looser: any (Object)->Object with 1 param, ignore modifiers
+        try {
+            return bridge.findMethod(FindMethod.create().searchInClass(classes)
+                    .matcher(MethodMatcher.create().returnType(Object.class)
+                            .paramCount(1).paramTypes(Object.class)));
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Drawer method loose query failed: " + t);
+        }
+        return new org.luckypray.dexkit.result.MethodDataList();
+    }
+
+    private Field findObjectArrayField(Class<?> clazz) {
+        // Try PUBLIC Object[] first (original), then any Object[] for 9.1.84+ (modifier change)
+        try {
+            var list = bridge.findField(FindField.create()
+                    .searchInClass(Collections.singletonList(bridge.getClassData(clazz)))
+                    .matcher(FieldMatcher.create().modifiers(Modifier.PUBLIC).type(Object[].class)));
+            if (!list.isEmpty()) return list.get(0).getFieldInstance(lpparm.classLoader);
+        } catch (Throwable ignored) {}
+        try {
+            var list = bridge.findField(FindField.create()
+                    .searchInClass(Collections.singletonList(bridge.getClassData(clazz)))
+                    .matcher(FieldMatcher.create().type(Object[].class)));
+            if (!list.isEmpty()) return list.get(0).getFieldInstance(lpparm.classLoader);
+        } catch (Throwable ignored) {}
+        // Reflection fallback
+        for (Class<?> t = clazz; t != null && t != Object.class; t = t.getSuperclass()) {
+            for (Field f : t.getDeclaredFields()) {
+                if (f.getType() == Object[].class) {
+                    f.setAccessible(true);
+                    return f;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void installSettingsFallback() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                private boolean hooked = false;
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (hooked) return;
+                    hooked = true;
+                    try {
+                        Activity act = (Activity) param.thisObject;
+                        if (!act.getClass().getName().contains("SpotifyMainActivity")) return;
+                        android.view.ViewGroup root = (android.view.ViewGroup) act.getWindow().getDecorView();
+                        if (root.findViewWithTag("spotifyplus_fallback_btn") != null) return;
+                        android.widget.Button btn = new android.widget.Button(act);
+                        btn.setTag("spotifyplus_fallback_btn");
+                        btn.setText("Plus");
+                        btn.setAlpha(0.85f);
+                        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                        lp.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.END;
+                        lp.bottomMargin = 260;
+                        lp.rightMargin = 24;
+                        root.addView(btn, lp);
+                        btn.setOnClickListener(v -> {
+                            try {
+                                android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse("spotify:settings"));
+                                i.setPackage("com.spotify.music");
+                                act.startActivity(i);
+                                android.widget.Toast.makeText(act, "Spotify Plus: open drawer Settings, Plus entry injects there when drawer hook matches", android.widget.Toast.LENGTH_LONG).show();
+                            } catch (Throwable t) {
+                                XposedBridge.log(t);
+                            }
+                        });
+                        XposedBridge.log("[SpotifyPlus] Installed settings fallback floating button (drawer matcher failed)");
+                    } catch (Throwable t) {
+                        XposedBridge.log(t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Fallback install failed: " + t);
+        }
+    }
+
+    private String collectDrawerDestinations(Object[] items) {
+        try {
+            Set<String> out = new java.util.LinkedHashSet<>();
+            for (Object item : items) collectStrings(item, 6, new IdentityHashMap<>(), out);
+            List<String> uris = new ArrayList<>();
+            for (String s : out) if (s.startsWith("spotify:")) uris.add(s);
+            Collections.sort(uris);
+            return uris.size() > 25 ? uris.subList(0, 25).toString() + "..." : uris.toString();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private void collectStrings(Object value, int depth, IdentityHashMap<Object, Boolean> visited, Set<String> out) {
+        if (value instanceof String) {
+            String s = (String) value;
+            if (s.startsWith("spotify:") && s.length() < 120) out.add(s);
+            return;
+        }
+        if (value == null || depth == 0 || visited.put(value, Boolean.TRUE) != null) return;
+        Class<?> vc = value.getClass();
+        if (vc.isPrimitive() || vc.isEnum() || vc.isArray() || vc.getName().startsWith("java.") || vc.getName().startsWith("android.") || vc.getName().startsWith("kotlin.")) return;
+        for (Class<?> type = vc; type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
+                try {
+                    field.setAccessible(true);
+                    collectStrings(field.get(value), depth - 1, visited, out);
+                } catch (Throwable ignored) {}
+            }
+        }
+    }
+
     private int findSettingsItemIndex(Object[] items) {
         for (int i = 0; i < items.length; i++) {
-            if (containsSettingsDestination(items[i], 4, new IdentityHashMap<>())) return i;
+            if (containsSettingsDestination(items[i], 6, new IdentityHashMap<>())) return i;
+        }
+        // 9.1.84+ substring fallback (e.g. spotify:settings:xxx, renamed routes)
+        for (int i = 0; i < items.length; i++) {
+            if (containsSettingsSubstring(items[i], 6, new IdentityHashMap<>())) return i;
         }
         return -1;
     }
 
+    private boolean containsSettingsSubstring(Object value, int depth, IdentityHashMap<Object, Boolean> visited) {
+        if (value instanceof String) {
+            String s = ((String) value).toLowerCase(java.util.Locale.ROOT);
+            return s.contains("setting") || s.contains("preference") || s.contains("privacy");
+        }
+        if (value == null || depth == 0 || visited.put(value, Boolean.TRUE) != null) return false;
+        Class<?> vc = value.getClass();
+        if (vc.isPrimitive() || vc.isEnum() || vc.isArray() || vc.getName().startsWith("java.") || vc.getName().startsWith("android.") || vc.getName().startsWith("kotlin.")) return false;
+        for (Class<?> type = vc; type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
+                try {
+                    field.setAccessible(true);
+                    if (containsSettingsSubstring(field.get(value), depth - 1, visited)) return true;
+                } catch (Throwable ignored) {}
+            }
+        }
+        return false;
+    }
+
     private boolean containsSettingsDestination(Object value, int remainingDepth, IdentityHashMap<Object, Boolean> visited) {
+        if (value instanceof String) {
+            String s = (String) value;
+            if (s.equals("spotify:settings") || s.equals("spotify:preferences") || s.equals("spotify:config")) return true;
+            // 9.1.84+: settings sub-routes like spotify:settings:xxx / spotify:config:xxx
+            if (s.startsWith("spotify:settings") || s.startsWith("spotify:preferences") || s.startsWith("spotify:config")) return true;
+            return false;
+        }
         return containsDrawerDestination(value, remainingDepth, visited, "spotify:settings", "spotify:preferences", "spotify:config");
     }
 
     private boolean containsDrawerDestination(Object value, int remainingDepth, IdentityHashMap<Object, Boolean> visited, String... destinations) {
-        if (value instanceof String && Arrays.asList(destinations).contains(value)) return true;
+        if (value instanceof String) {
+            String s = (String) value;
+            for (String dest : destinations) {
+                if (s.equals(dest)) return true;
+                // 9.1.84+: allow sub-routes, but keep spotify:null exact to avoid false dedup
+                if (!dest.equals("spotify:null") && s.startsWith(dest)) return true;
+            }
+            return false;
+        }
         if (value == null || remainingDepth == 0 || visited.put(value, Boolean.TRUE) != null) return false;
         Class<?> valueClass = value.getClass();
         if (valueClass.isPrimitive() || valueClass.isEnum() || valueClass.isArray() || valueClass.getName().startsWith("java.") || valueClass.getName().startsWith("android.") || valueClass.getName().startsWith("kotlin.")) return false;
@@ -1094,7 +1339,7 @@ public class RemoveCreateButtonHook extends SpotifyHook {
                 try {
                     field.setAccessible(true);
                     Object value = field.get(owner);
-                    if (containsSettingsDestination(value, 3, new IdentityHashMap<>())) return value;
+                    if (containsSettingsDestination(value, 5, new IdentityHashMap<>())) return value;
                 } catch (Throwable ignored) {
                 }
             }
