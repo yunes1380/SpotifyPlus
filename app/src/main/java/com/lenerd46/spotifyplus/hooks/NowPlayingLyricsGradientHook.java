@@ -301,6 +301,7 @@ public class NowPlayingLyricsGradientHook extends SpotifyHook {
                     mediaTrackUri = uri;
                     CharSequence title = metadata.getText(MediaMetadata.METADATA_KEY_TITLE);
                     mediaTrackTitle = title == null ? "" : title.toString();
+                    References.updateMediaTrack(uri, mediaTrackTitle);
                     lastTrackCheck = 0;
                     if(isNowPlayingViewVisible()) ensureTrackAndLyrics();
                 }
@@ -316,12 +317,20 @@ public class NowPlayingLyricsGradientHook extends SpotifyHook {
         if(state == null) return false;
         int fields = 0;
         int strings = 0;
+        boolean hasDisplayObject = false;
         for(Field field : state.getClass().getDeclaredFields()) {
             if(Modifier.isStatic(field.getModifiers())) continue;
             fields++;
             if(field.getType() == String.class) strings++;
+            else hasDisplayObject = true;
         }
-        return fields == 3 && strings == 2;
+        // Pre-9.1.88: exactly 3 fields / 2 strings. 9.1.88+: accept nearby shapes.
+        if(fields == 3 && strings == 2) return true;
+        if(fields >= 2 && fields <= 5 && strings >= 1 && hasDisplayObject) {
+            XposedBridge.log("[SpotifyPlus][NPV Lyrics] Tolerant lyrics-state match: " + state.getClass().getName() + " fields=" + fields + " strings=" + strings);
+            return true;
+        }
+        return false;
     }
 
     private boolean hasVisibleLyrics(Object state) {
@@ -770,7 +779,21 @@ public class NowPlayingLyricsGradientHook extends SpotifyHook {
         ensureTrackAndLyrics();
         if(timedLines.isEmpty() || !loadedTrackUriEqualsRequested()) return;
         long position = getPlaybackPosition();
-        if(position < 0) return;
+        if(position < 0) {
+            // Playback position not seen yet (MediaSession hook timing on 9.1.88+):
+            // show the first line statically instead of hiding lyrics entirely.
+            TimedLine first = timedLines.get(0);
+            boolean positioned = positionOverlay();
+            if(lyricContainer == null || overlayHost == null || !positioned) return;
+            if(displayedLine != first) {
+                lyricContainer.removeAllViews();
+                lyricContainer.setJustifyContent(first.oppositeAligned ? JustifyContent.FLEX_END : JustifyContent.FLEX_START);
+                activeVocals = new SyllableVocals(lyricContainer, first.syllables, false, false, first.oppositeAligned, References.currentActivity, 16);
+                displayedLine = first;
+            }
+            lyricContainer.setVisibility(View.VISIBLE);
+            return;
+        }
         TimedLine line = findLine(position / 1000d);
         if(line == null) {
             if(lyricContainer != null) lyricContainer.setVisibility(View.INVISIBLE);
@@ -862,12 +885,24 @@ public class NowPlayingLyricsGradientHook extends SpotifyHook {
 
     private Anchor findTitleAnchor(Activity activity) {
         String title = normalize(requestedTrackTitle);
-        if(title.isEmpty()) return null;
+        if(title.isEmpty()) title = normalize(mediaTrackTitle);
         View decor = activity.getWindow().getDecorView();
         if(!(decor instanceof ViewGroup)) return null;
-        Rect titleBounds = findTitleTextViewBounds(decor, title);
-        Anchor anchor = titleBounds == null ? findAnchor(decor, title) : new Anchor((ViewGroup) decor, titleBounds);
-        if(anchor == null) return null;
+        Anchor anchor = null;
+        if(!title.isEmpty()) {
+            Rect titleBounds = findTitleTextViewBounds(decor, title);
+            anchor = titleBounds == null ? findAnchor(decor, title) : new Anchor((ViewGroup) decor, titleBounds);
+        }
+        if(anchor == null) {
+            // 9.1.88+ fallback: title view not found (Compose hierarchy changed).
+            // Place the line above the bottom third instead of hiding lyrics entirely.
+            int w = decor.getWidth();
+            int h = decor.getHeight();
+            if(w <= 0 || h <= 0) return null;
+            int top = (int) (h * 0.52);
+            anchor = new Anchor((ViewGroup) decor, new Rect((int)(w * 0.08), top, (int)(w * 0.92), top + 2));
+            XposedBridge.log("[SpotifyPlus][NPV Lyrics] Title anchor miss for '" + title + "', using fallback position");
+        }
         int spacing = Math.round(48f * activity.getResources().getDisplayMetrics().density);
         int height = Math.round(40f * activity.getResources().getDisplayMetrics().density);
         int[] hostLocation = new int[2];

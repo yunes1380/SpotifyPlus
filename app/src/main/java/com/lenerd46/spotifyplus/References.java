@@ -53,10 +53,80 @@ public class References {
     private static volatile Class<?> playbackPositionStateClass;
     private static volatile Field playbackPositionField;
 
+    // 9.1.88+: MediaSession metadata fallback so lyrics still resolve when the
+    // player-model method names change. Updated from NowPlayingLyricsGradientHook.
+    public static volatile String lastMediaUri = "";
+    public static volatile String lastMediaTitle = "";
+
+    public static void updateMediaTrack(String uri, String title) {
+        if (uri != null) lastMediaUri = uri;
+        if (title != null) lastMediaTitle = title;
+    }
+
+    private static SpotifyTrack mediaFallbackTrack() {
+        String uri = lastMediaUri;
+        if (uri == null || !uri.startsWith("spotify:track:")) return null;
+        String title = lastMediaTitle == null ? "" : lastMediaTitle;
+        XposedBridge.log("[SpotifyPlus] Using MediaSession fallback track: " + uri);
+        return new SpotifyTrack(title, "", "", uri, 0, "", System.currentTimeMillis(), "", 0, false);
+    }
+
+    private static Method resolveHasTrackMethod(XC_LoadPackage.LoadPackageParam lpparam, DexKitBridge bridge, Object wrapper) {
+        if (hasTrackMethod != null) return hasTrackMethod;
+        String className = wrapper.getClass().getName();
+        // Exact (pre-9.1.88)
+        try {
+            var clazz = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().className(className)));
+            hasTrackMethod = bridge.findMethod(FindMethod.create().searchInClass(clazz).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).returnType(boolean.class).paramCount(0))).get(0).getMethodInstance(lpparam.classLoader);
+            return hasTrackMethod;
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] hasTrack exact fingerprint failed on " + className + ", trying behavior scan");
+        }
+        // Behavior scan: any no-arg boolean method (take first; verified by call below)
+        for (Method m : wrapper.getClass().getDeclaredMethods()) {
+            if (m.getParameterCount() == 0 && m.getReturnType() == boolean.class) {
+                m.setAccessible(true);
+                hasTrackMethod = m;
+                XposedBridge.log("[SpotifyPlus] hasTrack behavior fallback: " + m.getName());
+                return hasTrackMethod;
+            }
+        }
+        return null;
+    }
+
+    private static Method resolveContextTrackMethod(XC_LoadPackage.LoadPackageParam lpparam, DexKitBridge bridge, Object wrapper, Class<?> contextClass) {
+        if (getContextTrack != null) return getContextTrack;
+        String className = wrapper.getClass().getName();
+        // Exact (pre-9.1.88)
+        try {
+            var clazz = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().className(className)));
+            getContextTrack = bridge.findMethod(FindMethod.create().searchInClass(clazz).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).paramCount(0).returnType(Object.class))).get(0).getMethodInstance(lpparam.classLoader);
+            return getContextTrack;
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] contextTrack exact fingerprint failed on " + className + ", trying behavior scan");
+        }
+        // Behavior scan: call 0-arg object-returning methods, keep the one yielding ContextTrack
+        for (Method m : wrapper.getClass().getDeclaredMethods()) {
+            if (m.getParameterCount() != 0 || m.getReturnType().isPrimitive()
+                    || m.getReturnType() == String.class || m.getReturnType() == void.class) continue;
+            try {
+                m.setAccessible(true);
+                Object probe = m.invoke(wrapper);
+                if (probe != null && contextClass.isInstance(probe)) {
+                    getContextTrack = m;
+                    XposedBridge.log("[SpotifyPlus] contextTrack behavior fallback: " + m.getName());
+                    return getContextTrack;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
     public static SpotifyTrack getTrackTitle(XC_LoadPackage.LoadPackageParam lpparam, DexKitBridge bridge) {
         if(playerState == null || playerState.get() == null) {
-            XposedBridge.log("[SpotifyPlus] playerState is null");
-            return null;
+            XposedBridge.log("[SpotifyPlus] playerState is null, trying MediaSession fallback");
+            return mediaFallbackTrack();
         }
 
         Object state = playerState.get();
@@ -64,21 +134,29 @@ public class References {
         try {
             Object wrapper = XposedHelpers.callMethod(state, "track");
 
-            var className = wrapper.getClass().getName();
-            if(hasTrackMethod == null) {
-                var clazz = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().className(className)));
-                hasTrackMethod = bridge.findMethod(FindMethod.create().searchInClass(clazz).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).returnType(boolean.class).paramCount(0))).get(0).getMethodInstance(lpparam.classLoader);
+            Class<?> contextClass;
+            try {
+                contextClass = XposedHelpers.findClass("com.spotify.player.model.ContextTrack", lpparam.classLoader);
+            } catch (Throwable t) {
+                XposedBridge.log("[SpotifyPlus] ContextTrack class missing, trying MediaSession fallback");
+                SpotifyTrack fallback = mediaFallbackTrack();
+                return fallback != null ? fallback : null;
+            }
+            Method hasTrack = resolveHasTrackMethod(lpparam, bridge, wrapper);
+            if (hasTrack == null) {
+                XposedBridge.log("[SpotifyPlus] hasTrack unresolvable, trying MediaSession fallback");
+                return mediaFallbackTrack();
             }
 
-            boolean hasTrack = (Boolean) XposedHelpers.callMethod(wrapper, hasTrackMethod.getName());
-            if(hasTrack) {
-                if(getContextTrack == null) {
-                    var clazz = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().className(className)));
-                    getContextTrack = bridge.findMethod(FindMethod.create().searchInClass(clazz).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).paramCount(0).returnType(Object.class))).get(0).getMethodInstance(lpparam.classLoader);
+            boolean hasTrackResult = (Boolean) hasTrack.invoke(wrapper);
+            if(hasTrackResult) {
+                Method contextTrackMethod = resolveContextTrackMethod(lpparam, bridge, wrapper, contextClass);
+                if (contextTrackMethod == null) {
+                    XposedBridge.log("[SpotifyPlus] contextTrack unresolvable, trying MediaSession fallback");
+                    return mediaFallbackTrack();
                 }
 
-                Object ct = XposedHelpers.callMethod(wrapper, getContextTrack.getName());
-                Class<?> contextClass = XposedHelpers.findClass("com.spotify.player.model.ContextTrack", lpparam.classLoader);
+                Object ct = contextTrackMethod.invoke(wrapper);
                 if(contextClass.isInstance(ct)) {
                     Object track = contextClass.cast(ct);
 
@@ -115,8 +193,8 @@ public class References {
 
                     return new SpotifyTrack(title, artist, album, uri, position, color, timestamp, imageId, 0, saved);
                 } else {
-                    XposedBridge.log("[SpotifyPlus] ContextTrack not found!");
-                    return null;
+                    XposedBridge.log("[SpotifyPlus] ContextTrack not found, trying MediaSession fallback");
+                    return mediaFallbackTrack();
                 }
             } else {
                 XposedBridge.log("[SpotifyPlus] No track found");
@@ -124,7 +202,8 @@ public class References {
             }
         } catch(Exception e) {
             Log.e("SpotifyPlus", "Error getting track information", e);
-            return null;
+            SpotifyTrack fallback = mediaFallbackTrack();
+            return fallback != null ? fallback : null;
         }
     }
 
