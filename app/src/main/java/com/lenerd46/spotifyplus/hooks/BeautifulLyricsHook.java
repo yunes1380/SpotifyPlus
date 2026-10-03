@@ -389,6 +389,44 @@ public class BeautifulLyricsHook extends SpotifyHook {
         }
     }
 
+    // 9.1.88+: exact seek-request fingerprint first, then behavior scan for any
+    // final class holding one long with a (long) constructor. Never throws.
+    private Class<?> findSeekRequestClass() {
+        try {
+            return bridge
+                    .findClass(FindClass.create()
+                            .matcher(ClassMatcher.create()
+                                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).fieldCount(1)
+                                    .addField(FieldMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).type(long.class))
+                                    .methods(MethodsMatcher.create().count(6)
+                                            .add(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).returnType(Object.class).paramCount(13))
+                                            .add(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).returnType(void.class).paramCount(12))
+                                            .add(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.FINAL).returnType(boolean.class).addParamType(Object.class)))))
+                    .get(0).getInstance(lpparm.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Seek request exact fingerprint failed, scanning behaviorally");
+        }
+        try {
+            var candidates = bridge.findClass(FindClass.create().matcher(ClassMatcher.create()
+                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).fieldCount(1)
+                    .addField(FieldMatcher.create().type(long.class))));
+            for (var data : candidates) {
+                try {
+                    Class<?> c = data.getInstance(lpparm.classLoader);
+                    Constructor<?> ctor = c.getConstructor(long.class);
+                    if (ctor != null) {
+                        XposedBridge.log("[SpotifyPlus] Seek request behavior fallback: " + c.getName());
+                        return c;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] Seek request behavior scan failed: " + t);
+        }
+        return null;
+    }
+
     private void openOverlay(Activity activity, boolean scrollToTop) {
         if (activity == null || activity.isFinishing() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed())) return;
         if (overlayHost != null && overlayActivity == activity && overlayHost.isAttachedToWindow()) {
@@ -1656,35 +1694,16 @@ public class BeautifulLyricsHook extends SpotifyHook {
                         handler.post(() -> {
                             if (!isOverlaySessionActive(activity, track, pageTranslationSession)) return;
                             try {
-                                Class<?> requestClass = bridge
-                                        .findClass(FindClass.create()
-                                                .matcher(ClassMatcher.create()
-                                                        .modifiers(Modifier.PUBLIC | Modifier.FINAL).fieldCount(
-                                                                1)
-                                                        .addField(FieldMatcher
-                                                                .create().modifiers(
-                                                                        Modifier.PUBLIC | Modifier.FINAL)
-                                                                .type(long.class))
-                                                        .methods(MethodsMatcher.create()
-                                                                .count(6)
-                                                                .add(MethodMatcher.create()
-                                                                        .modifiers(Modifier.PUBLIC | Modifier.FINAL)
-                                                                        .returnType(Object.class).paramCount(13))
-                                                                .add(MethodMatcher.create()
-                                                                        .modifiers(Modifier.PUBLIC | Modifier.FINAL)
-                                                                        .returnType(void.class).paramCount(12))
-                                                                .add(MethodMatcher.create()
-                                                                        .modifiers(Modifier.PUBLIC | Modifier.FINAL)
-                                                                        .returnType(boolean.class)
-                                                                        .addParamType(Object.class)))))
-                                        .get(0).getInstance(lpparm.classLoader);
-
-                                ctor = requestClass.getConstructor(long.class);
-                                ctor.setAccessible(true);
+                                Class<?> requestClass = findSeekRequestClass();
+                                if (requestClass == null) {
+                                    XposedBridge.log("[SpotifyPlus] Seek request class not found on this Spotify version; tap-to-seek uses MediaController fallback");
+                                } else {
+                                    ctor = requestClass.getConstructor(long.class);
+                                    ctor.setAccessible(true);
+                                }
                             } catch (Exception e) {
+                                XposedBridge.log("[SpotifyPlus] Seek request lookup failed; tap-to-seek uses MediaController fallback");
                                 XposedBridge.log(e);
-                                Toast.makeText(activity, References.getString(R.string.ui_failed_to_load_lyrics), Toast.LENGTH_SHORT).show();
-                                return;
                             }
 
                             try {

@@ -188,8 +188,55 @@ final class ModernContextMenuHook extends SpotifyHook {
             XposedBridge.log("[SpotifyPlus][ContextMenu] Cloned callback via arity-prefixed constructor");
             return widened.get(0).newInstance(args);
         }
+        // Last resort (9.1.88 p.jes0 has no matching constructor at all):
+        // allocate without a constructor and copy instance fields directly.
+        Object unsafeClone = allocateWithoutConstructor(template, fields, values);
+        if (unsafeClone != null) {
+            XposedBridge.log("[SpotifyPlus][ContextMenu] Cloned callback via Unsafe allocateInstance");
+            return unsafeClone;
+        }
         throw new IllegalStateException("Cannot uniquely clone menu callback " + template.getClass()
                 + " (exact=" + exact.size() + " accepting=" + candidates.size() + " widened=" + widened.size() + ")");
+    }
+
+    private static Object allocateWithoutConstructor(Object template, List<Field> fields, Object[] values) {
+        try {
+            // Pure reflection: no compile-time dependency on sun.misc.Unsafe.
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            Field unsafeField = unsafeClass.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Object unsafe = unsafeField.get(null);
+            Method allocate = unsafeClass.getMethod("allocateInstance", Class.class);
+            Object instance = allocate.invoke(unsafe, template.getClass());
+            for (int i = 0; i < fields.size(); i++) {
+                Field f = fields.get(i);
+                Object v = values[i];
+                Class<?> t = f.getType();
+                if (!t.isPrimitive()) {
+                    f.set(instance, v);
+                } else if (t == int.class) {
+                    f.setInt(instance, v == null ? 0 : ((Number) v).intValue());
+                } else if (t == boolean.class) {
+                    f.setBoolean(instance, v != null && (Boolean) v);
+                } else if (t == long.class) {
+                    f.setLong(instance, v == null ? 0L : ((Number) v).longValue());
+                } else if (t == float.class) {
+                    f.setFloat(instance, v == null ? 0f : ((Number) v).floatValue());
+                } else if (t == double.class) {
+                    f.setDouble(instance, v == null ? 0d : ((Number) v).doubleValue());
+                } else if (t == byte.class) {
+                    f.setByte(instance, v == null ? (byte) 0 : ((Number) v).byteValue());
+                } else if (t == short.class) {
+                    f.setShort(instance, v == null ? (short) 0 : ((Number) v).shortValue());
+                } else if (t == char.class) {
+                    f.setChar(instance, v == null ? '\0' : (Character) v);
+                }
+            }
+            return instance;
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus][ContextMenu] Unsafe clone failed: " + t);
+            return null;
+        }
     }
 
     private static int invokeArity(Class<?> type) {

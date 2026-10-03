@@ -82,13 +82,95 @@ public final class NowPlayingViewHook extends SpotifyHook {
         return enabled;
     }
 
+    private static final int NPV_FLOATING_LYRICS_TAG = 0x53504C47;
+
     @Override
     protected void hook() {
         new NowPlayingLandscapeHook().init(lpparm, bridge);
         new NowPlayingSwipeHook().init(lpparm, bridge);
         new NowPlayingCardsHook().init(lpparm, bridge);
         new NowPlayingControlsHook().init(lpparm, bridge);
+        // 9.1.88+: NPV no longer inflates PeekScrollView, so the row lyrics button
+        // has no host. Pin a floating button at activity level instead.
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Activity activity = (Activity) param.thisObject;
+                        if (!"com.spotify.nowplaying.musicinstallation.NowPlayingActivity".equals(activity.getClass().getName())) return;
+                        activity.getWindow().getDecorView().post(() -> ensureNpvFloatingLyricsButton(activity));
+                    } catch (Throwable t) {
+                        XposedBridge.log("[SpotifyPlus][NowPlayingView] NPV resume hook failed");
+                        XposedBridge.log(t);
+                    }
+                }
+            });
+            XposedBridge.log("[SpotifyPlus][NowPlayingView] NPV floating lyrics entry installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus][NowPlayingView] NPV floating lyrics entry failed");
+            XposedBridge.log(t);
+        }
         XposedBridge.log("[SpotifyPlus][NowPlayingView] Dynamic experimental redesign hooks installed");
+    }
+
+    private void ensureNpvFloatingLyricsButton(Activity activity) {
+        try {
+            if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+            android.view.View decor = activity.getWindow().getDecorView();
+            if (!(decor instanceof android.view.ViewGroup)) return;
+            android.view.ViewGroup root = (android.view.ViewGroup) decor;
+            Object existing = root.getTag(NPV_FLOATING_LYRICS_TAG);
+            if (existing instanceof android.view.View) {
+                if (((android.view.View) existing).getVisibility() != android.view.View.VISIBLE) ((android.view.View) existing).setVisibility(android.view.View.VISIBLE);
+                return;
+            }
+            float density = root.getResources().getDisplayMetrics().density;
+            int size = Math.round(52 * density);
+            int margin = Math.round(20 * density);
+            ImageView button = new ImageView(activity);
+            button.setImageDrawable(lyricsBadge(activity, density));
+            try {
+                button.setContentDescription(References.getString(R.string.lyrics_button));
+            } catch (Throwable ignored) {
+                button.setContentDescription("Lyrics");
+            }
+            int pad = Math.round(12 * density);
+            button.setPadding(pad, pad, pad, pad);
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0x52242424);
+            bg.setCornerRadius(Math.round(100 * density));
+            button.setBackground(bg);
+            button.setOnClickListener(view -> BeautifulLyricsHook.showOverlay(activity, false));
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(size, size, Gravity.BOTTOM | Gravity.END);
+            params.setMargins(margin, margin, margin, Math.round(150 * density));
+            root.addView(button, params);
+            root.setTag(NPV_FLOATING_LYRICS_TAG, button);
+            XposedBridge.log("[SpotifyPlus][NowPlayingView] Installed NPV floating lyrics button");
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus][NowPlayingView] NPV floating button failed");
+            XposedBridge.log(t);
+        }
+    }
+
+    private Drawable lyricsBadge(Activity activity, float density) {
+        int size = Math.round(24 * density);
+        float scale = size / 24f;
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap);
+        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(android.graphics.Color.WHITE);
+        paint.setStrokeWidth(Math.round(2 * density));
+        paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+        canvas.drawLine(3f * scale, 6f * scale, 15f * scale, 6f * scale, paint);
+        canvas.drawLine(3f * scale, 11f * scale, 12f * scale, 11f * scale, paint);
+        canvas.drawLine(3f * scale, 16f * scale, 10f * scale, 16f * scale, paint);
+        paint.setStyle(android.graphics.Paint.Style.STROKE);
+        canvas.drawLine(17f * scale, 5f * scale, 17f * scale, 16f * scale, paint);
+        canvas.drawLine(17f * scale, 5f * scale, 22f * scale, 4f * scale, paint);
+        paint.setStyle(android.graphics.Paint.Style.FILL);
+        canvas.drawCircle(14.5f * scale, 17f * scale, 2.5f * scale, paint);
+        return new android.graphics.drawable.BitmapDrawable(activity.getResources(), bitmap);
     }
 }
 
