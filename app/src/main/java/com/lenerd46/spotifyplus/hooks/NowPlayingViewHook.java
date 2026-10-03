@@ -726,18 +726,29 @@ final class NowPlayingControlsHook extends SpotifyHook {
         addCell(row, next, dp(root, 44));
     }
 
+    private static final int FLOATING_LYRICS_TAG = 0x53504C46;
+    private static volatile boolean bottomActionsDiagLogged = false;
+
     private void arrangeBottomActions(View root) {
         ViewGroup trackInfo = findGroup(root, "track_info_feedback_container");
         View negativeFeedback = trackInfo == null ? null : findByDescription(trackInfo, string(root, "np_content_desc_ban"));
         if(negativeFeedback != null) negativeFeedback.setVisibility(View.GONE);
         ViewGroup footer = findGroup(root, "revised_template_overlay_footer");
         ViewGroup accessory = findGroup(root, "accessory_row");
-        if(footer == null || accessory == null || footer.getTag(ACTIONS_TAG) != null) return;
+        if(footer == null || accessory == null || footer.getTag(ACTIONS_TAG) != null) {
+            logBottomActionsMiss(root, footer, accessory);
+            ensureFloatingLyricsButton(root);
+            return;
+        }
         View share = findByDescription(accessory, string(root, "np_content_desc_share"));
         View queueIcon = find(root, "queue_button");
         View queue = queueIcon == null ? null : directChildOf(queueIcon, accessory);
         share = share == null ? null : directChildOf(share, accessory);
-        if(share == null || queue == null) return;
+        if(share == null || queue == null) {
+            logBottomActionsMiss(root, footer, accessory);
+            ensureFloatingLyricsButton(root);
+            return;
+        }
         detach(share);
         detach(queue);
         LyricsState state = state(root);
@@ -770,6 +781,57 @@ final class NowPlayingControlsHook extends SpotifyHook {
         addCell(row, lyrics, dp(root, 48));
         addCell(row, share, dp(root, 48));
         addCell(row, queue, dp(root, 48));
+    }
+
+    private void logBottomActionsMiss(View root, ViewGroup footer, ViewGroup accessory) {
+        if(bottomActionsDiagLogged) return;
+        bottomActionsDiagLogged = true;
+        try {
+            XposedBridge.log("[SpotifyPlus][NowPlayingControls] Footer injection miss: footer=" + (footer != null)
+                    + " accessory=" + (accessory != null)
+                    + " shareDesc=" + (string(root, "np_content_desc_share") != null)
+                    + " queueBtn=" + (find(root, "queue_button") != null)
+                    + " trackInfo=" + (findGroup(root, "track_info_feedback_container") != null));
+        } catch(Throwable ignored) {
+        }
+    }
+
+    // 9.1.88+: footer/accessory row IDs changed, so the row lyrics button has no
+    // host. Pin a small floating lyrics button to the NPV root instead so the
+    // fullscreen/embedded lyrics stay reachable on every version.
+    private void ensureFloatingLyricsButton(View root) {
+        try {
+            if(!(root instanceof ViewGroup)) return;
+            ViewGroup group = (ViewGroup) root;
+            View existing = group.findViewWithTag(FLOATING_LYRICS_TAG);
+            if(existing != null) {
+                if(existing.getVisibility() != View.VISIBLE) existing.setVisibility(View.VISIBLE);
+                return;
+            }
+            LyricsState state = state(root);
+            ImageView button = new ImageView(root.getContext());
+            button.setTag(FLOATING_LYRICS_TAG);
+            button.setImageDrawable(lyricsIcon(root));
+            try {
+                button.setContentDescription(References.getString(R.string.lyrics_button));
+            } catch(Throwable ignored) {
+                button.setContentDescription("Lyrics");
+            }
+            int size = dp(root, 52);
+            button.setPadding(dp(root, 12), dp(root, 12), dp(root, 12), dp(root, 12));
+            button.setBackground(capsule(root, 0x52242424));
+            button.setOnClickListener(view -> toggleLyrics(root));
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(size, size, Gravity.BOTTOM | Gravity.END);
+            int margin = dp(root, 20);
+            params.setMargins(margin, margin, margin, dp(root, 150));
+            group.addView(button, params);
+            button.setVisibility(View.VISIBLE);
+            state.lyricsButton = button;
+            XposedBridge.log("[SpotifyPlus][NowPlayingControls] Installed floating lyrics button fallback");
+        } catch(Throwable t) {
+            XposedBridge.log("[SpotifyPlus][NowPlayingControls] Floating lyrics button failed");
+            XposedBridge.log(t);
+        }
     }
 
     private void arrangeLandscape(View root, LyricsState state) {

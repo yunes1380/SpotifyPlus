@@ -71,6 +71,50 @@ public class RemoveCreateButtonHook extends SpotifyHook {
     private final static ConcurrentHashMap<Pair<Integer, String>, List<SettingItem.SettingSection>> scriptSettings = new ConcurrentHashMap<>();
     private final static ConcurrentHashMap<Pair<Integer, String>, Runnable> scriptSideButtons = new ConcurrentHashMap<>();
     private static final java.util.concurrent.atomic.AtomicBoolean overlayShown = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static volatile long lastDrawerMissLogMs = 0;
+
+    private static void logDrawerMissThrottled(Object[] items, Class<?> runtimeButtonClass) {
+        // Queue mutations fire constantly; only log plausible drawer candidates.
+        boolean plausible = items.length >= 5 && items.length <= 10;
+        long now = System.currentTimeMillis();
+        if (!plausible || now - lastDrawerMissLogMs < 60000) return;
+        lastDrawerMissLogMs = now;
+        XposedBridge.log("[SpotifyPlus] Settings row not found in drawer candidate (" + items.length
+                + " x " + runtimeButtonClass.getName() + "). Destinations: " + collectStaticDestinations(items));
+    }
+
+    private static String collectStaticDestinations(Object[] items) {
+        try {
+            Set<String> out = new java.util.LinkedHashSet<>();
+            for (Object item : items) collectStaticStrings(item, 6, new IdentityHashMap<>(), out);
+            List<String> uris = new ArrayList<>();
+            for (String s : out) if (s.startsWith("spotify:")) uris.add(s);
+            Collections.sort(uris);
+            return uris.size() > 25 ? uris.subList(0, 25).toString() + "..." : uris.toString();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private static void collectStaticStrings(Object value, int depth, IdentityHashMap<Object, Boolean> visited, Set<String> out) {
+        if (value instanceof String) {
+            String s = (String) value;
+            if (s.startsWith("spotify:") && s.length() < 120) out.add(s);
+            return;
+        }
+        if (value == null || depth == 0 || visited.put(value, Boolean.TRUE) != null) return;
+        Class<?> vc = value.getClass();
+        if (vc.isPrimitive() || vc.isEnum() || vc.isArray() || vc.getName().startsWith("java.") || vc.getName().startsWith("android.") || vc.getName().startsWith("kotlin.")) return;
+        for (Class<?> type = vc; type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
+                try {
+                    field.setAccessible(true);
+                    collectStaticStrings(field.get(value), depth - 1, visited, out);
+                } catch (Throwable ignored) {}
+            }
+        }
+    }
 
     public RemoveCreateButtonHook(final Context context) {
         this.context = context;
@@ -244,11 +288,15 @@ public class RemoveCreateButtonHook extends SpotifyHook {
                     // buttons, sooo. 9.1.84+: allow smaller drawers (was <4, now <2).
                     if (originalItems.length < 2) return;
                     if (Arrays.stream(originalItems).anyMatch(item -> containsDrawerDestination(item, 6, new IdentityHashMap<>(), "spotify:null"))) return;
+                    // 9.1.88+: loose matcher also hits queue/track-list mutations. Drawer
+                    // buttons never embed playable URIs, so skip those arrays silently.
+                    if (Arrays.stream(originalItems).anyMatch(item -> containsDrawerDestination(item, 6, new IdentityHashMap<>(),
+                            "spotify:track:", "spotify:album:", "spotify:episode:", "spotify:show:", "spotify:playlist:"))) return;
                     Class<?> runtimeButtonClass = originalItems[0].getClass();
                     if (Arrays.stream(originalItems).anyMatch(item -> !runtimeButtonClass.isInstance(item))) return;
                     int settingsItemIndex = findSettingsItemIndex(originalItems);
                     if (settingsItemIndex < 0) {
-                        XposedBridge.log("[SpotifyPlus] Settings row not found in drawer (" + originalItems.length + " items). Destinations: " + collectDrawerDestinations(originalItems));
+                        logDrawerMissThrottled(originalItems, runtimeButtonClass);
                         return;
                     }
                     int customItemIndex = settingsItemIndex + 1;
