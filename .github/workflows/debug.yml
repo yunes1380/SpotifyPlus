@@ -17,8 +17,8 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # Runner images already include the Android SDK; the setup-android action
+      # currently fails installing the obsolete 'tools' package, so skip it.
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
