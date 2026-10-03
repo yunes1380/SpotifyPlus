@@ -46,10 +46,19 @@ public class XposedLoader implements IXposedHookLoadPackage, IXposedHookZygoteIn
 
     private DexKitBridge bridge;
     private String modulePath = null;
-    private static final String MODULE_VERSION = "0.7.8-9.1.88";
+    private static final String MODULE_VERSION = "0.7.9-9.1.88";
 
     @Override
     public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
+        // Single-module build: the former SpotifyLyricFix companion lives here now.
+        if ("com.sec.android.app.music".equals(lpparam.packageName)) {
+            try {
+                new com.example.spotifylyricfix.LyricFixLoader().handleLoadPackage(lpparam);
+            } catch (Throwable t) {
+                XposedBridge.log(t);
+            }
+            return;
+        }
         if (!lpparam.packageName.equals("com.spotify.music"))
             return;
         XposedBridge.log("[SpotifyPlus] Loading SpotifyPlus v" + MODULE_VERSION);
@@ -63,6 +72,13 @@ public class XposedLoader implements IXposedHookLoadPackage, IXposedHookZygoteIn
         }
 
         SpotifyUserHook.init(lpparam.classLoader);
+        // Single-module build: former standalone SpotifyLyricFix companion.
+        try {
+            new com.example.spotifylyricfix.LyricFixLoader().handleLoadPackage(lpparam);
+        } catch (Throwable t) {
+            XposedBridge.log("[SpotifyPlus] LyricFix companion failed");
+            XposedBridge.log(t);
+        }
         new NowPlayingHeartHook().init(lpparam, bridge);
 
         XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {

@@ -12,8 +12,8 @@ android {
         applicationId "com.lenerd46.spotifyplus"
         minSdk 27
         targetSdk 35
-        versionCode 22
-        versionName "0.7.8-9.1.88"
+        versionCode 23
+        versionName "0.7.9-9.1.88"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
