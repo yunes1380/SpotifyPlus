@@ -153,12 +153,53 @@ final class ModernContextMenuHook extends SpotifyHook {
     private static Object cloneCallback(Object template) throws Exception {
         List<Field> fields = fields(template.getClass());
         Object[] values = values(template, fields);
-        List<Constructor<?>> candidates = Arrays.stream(template.getClass().getDeclaredConstructors())
+        Class<?>[] fieldTypes = fields.stream().map(Field::getType).toArray(Class<?>[]::new);
+        List<Constructor<?>> ctors = Arrays.asList(template.getClass().getDeclaredConstructors());
+        // 1. Primary data-class constructor: params exactly match field types in order.
+        List<Constructor<?>> exact = ctors.stream()
+                .filter(c -> Arrays.equals(c.getParameterTypes(), fieldTypes)).toList();
+        if (exact.size() == 1) {
+            exact.get(0).setAccessible(true);
+            return exact.get(0).newInstance(values);
+        }
+        // 2. Any constructor accepting the live values; prefer exact field-type match.
+        List<Constructor<?>> candidates = ctors.stream()
                 .filter(c -> c.getParameterCount() == values.length && accepts(c.getParameterTypes(), values)).toList();
-        if (candidates.size() != 1) throw new IllegalStateException("Cannot uniquely clone menu callback " + template.getClass());
-        Constructor<?> constructor = candidates.get(0);
-        constructor.setAccessible(true);
-        return constructor.newInstance(values);
+        if (candidates.size() == 1) {
+            candidates.get(0).setAccessible(true);
+            return candidates.get(0).newInstance(values);
+        }
+        if (candidates.size() > 1) {
+            XposedBridge.log("[SpotifyPlus][ContextMenu] Multiple callback constructors, using first of " + candidates.size());
+            candidates.get(0).setAccessible(true);
+            return candidates.get(0).newInstance(values);
+        }
+        // 3. 9.1.88+: Kotlin lambdas may carry a leading arity int (FunctionBase).
+        int arity = invokeArity(template.getClass());
+        List<Constructor<?>> widened = ctors.stream()
+                .filter(c -> c.getParameterCount() == values.length + 1
+                        && (c.getParameterTypes()[0] == int.class || c.getParameterTypes()[0] == Integer.class)
+                        && accepts(Arrays.copyOfRange(c.getParameterTypes(), 1, c.getParameterTypes().length), values)).toList();
+        if (widened.size() == 1) {
+            widened.get(0).setAccessible(true);
+            Object[] args = new Object[values.length + 1];
+            args[0] = arity;
+            System.arraycopy(values, 0, args, 1, values.length);
+            XposedBridge.log("[SpotifyPlus][ContextMenu] Cloned callback via arity-prefixed constructor");
+            return widened.get(0).newInstance(args);
+        }
+        throw new IllegalStateException("Cannot uniquely clone menu callback " + template.getClass()
+                + " (exact=" + exact.size() + " accepting=" + candidates.size() + " widened=" + widened.size() + ")");
+    }
+
+    private static int invokeArity(Class<?> type) {
+        int max = 0;
+        for (Method m : type.getDeclaredMethods()) {
+            if (m.getName().equals("invoke") && !m.isBridge() && !Modifier.isStatic(m.getModifiers())) {
+                max = Math.max(max, m.getParameterCount());
+            }
+        }
+        return max;
     }
 
     private static boolean accepts(Class<?>[] types, Object[] values) {

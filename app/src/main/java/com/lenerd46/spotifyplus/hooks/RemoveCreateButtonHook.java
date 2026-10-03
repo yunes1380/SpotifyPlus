@@ -80,7 +80,39 @@ public class RemoveCreateButtonHook extends SpotifyHook {
         if (!plausible || now - lastDrawerMissLogMs < 60000) return;
         lastDrawerMissLogMs = now;
         XposedBridge.log("[SpotifyPlus] Settings row not found in drawer candidate (" + items.length
-                + " x " + runtimeButtonClass.getName() + "). Destinations: " + collectStaticDestinations(items));
+                + " x " + runtimeButtonClass.getName() + "). Destinations: " + collectStaticDestinations(items)
+                + " Titles: " + collectStaticTitles(items));
+    }
+
+    private static String collectStaticTitles(Object[] items) {
+        try {
+            Set<String> out = new java.util.LinkedHashSet<>();
+            for (Object item : items) collectStaticTitleStrings(item, 6, new IdentityHashMap<>(), out);
+            List<String> list = new ArrayList<>(out);
+            return list.size() > 10 ? list.subList(0, 10).toString() + "..." : list.toString();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private static void collectStaticTitleStrings(Object value, int depth, IdentityHashMap<Object, Boolean> visited, Set<String> out) {
+        if (value instanceof String) {
+            String s = ((String) value).trim();
+            if (s.length() >= 3 && s.length() <= 48 && !s.startsWith("spotify:") && !s.startsWith("http")) out.add(s);
+            return;
+        }
+        if (value == null || depth == 0 || visited.put(value, Boolean.TRUE) != null || out.size() >= 30) return;
+        Class<?> vc = value.getClass();
+        if (vc.isPrimitive() || vc.isEnum() || vc.isArray() || vc.getName().startsWith("java.") || vc.getName().startsWith("android.") || vc.getName().startsWith("kotlin.")) return;
+        for (Class<?> type = vc; type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
+                try {
+                    field.setAccessible(true);
+                    collectStaticTitleStrings(field.get(value), depth - 1, visited, out);
+                } catch (Throwable ignored) {}
+            }
+        }
     }
 
     private static String collectStaticDestinations(Object[] items) {
