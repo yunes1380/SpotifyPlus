@@ -361,7 +361,7 @@ public class SmallLyric {
             view.setTag("lyricfix");
             view.setTextColor(Color.WHITE);
             view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
             view.setGravity(Gravity.CENTER);
             view.setSingleLine(true);
             view.setEllipsize(TextUtils.TruncateAt.MARQUEE);
