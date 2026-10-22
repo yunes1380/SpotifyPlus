@@ -44,10 +44,6 @@ public class PrivateSessionHook extends SpotifyHook {
             privateSessionKey = findSettingKey(settingKeysClass, "private_session");
             // 9.1.82 moved the RPC strings into a shared ClientBase implementation.
             // Identify the settings repository by its router and typed mutation API.
-            var setters = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
-                    .returnType("io.reactivex.rxjava3.core.Completable")
-                    .paramTypes((String) null, Object.class.getName())
-                    .declaredClass(ClassMatcher.create().addFieldForType("com.spotify.cosmos.rxrouter.RxRouter"))));
             java.util.List<Method> settingsMethods = new java.util.ArrayList<>();
             for (var setter : setters) {
                 Method method = setter.getMethodInstance(lpparm.classLoader);
