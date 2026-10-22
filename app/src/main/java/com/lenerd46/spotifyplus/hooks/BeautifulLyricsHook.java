@@ -45,6 +45,7 @@ import org.jetbrains.annotations.NotNull;
 import org.luckypray.dexkit.query.FindClass;
 import org.luckypray.dexkit.query.FindMethod;
 import org.luckypray.dexkit.query.matchers.*;
+import org.luckypray.dexkit.result.MethodData;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -358,34 +359,58 @@ public class BeautifulLyricsHook extends SpotifyHook {
             var okHttp = bridge.findClass(
                     FindClass.create().matcher(ClassMatcher.create().usingStrings("method.isEmpty() == true",
                             " must not have a request body.", " must have a request body.")));
-            if (okHttp.size() != 1) throw new IllegalStateException("Ambiguous HTTP request builder: " + okHttp);
-            var requests = bridge.findMethod(FindMethod.create().searchInClass(okHttp)
-                    .matcher(MethodMatcher.create().returnType(void.class)
-                            .modifiers(Modifier.PUBLIC | Modifier.FINAL).paramTypes(String.class, String.class)));
-            if (requests.isEmpty()) throw new IllegalStateException("No OkHttp header writers found");
-            for (var request : requests) XposedBridge.hookMethod(request.getMethodInstance(lpparm.classLoader), new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    String headerName = (String) param.args[0];
-                    String headerValue = (String) param.args[1];
-
-                    if (headerName != null && headerName.equalsIgnoreCase("authorization") && headerValue != null
-                            && headerValue.regionMatches(true, 0, "Bearer ", 0, 7)) {
-                        String token = headerValue.substring(7).trim();
-                        if (token.isEmpty()) return;
-                        String accessToken = References.accessToken;
-
-                        if (accessToken != null && !accessToken.isEmpty() && accessToken.equals(token))
-                            return;
-                        References.accessToken = token;
-                    } else if (headerName != null && headerName.equalsIgnoreCase("client-token")
-                            && headerValue != null && !headerValue.isBlank()) {
-                        References.clientToken = headerValue.trim();
+            java.util.List<MethodData> requests = okHttp.size() == 1
+                    ? bridge.findMethod(FindMethod.create().searchInClass(okHttp)
+                            .matcher(MethodMatcher.create().returnType(void.class)
+                                    .modifiers(Modifier.PUBLIC | Modifier.FINAL).paramTypes(String.class, String.class)))
+                    : new java.util.ArrayList<>();
+            if (!requests.isEmpty()) {
+                for (var request : requests) XposedBridge.hookMethod(request.getMethodInstance(lpparm.classLoader), new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        recordToken((String) param.args[0], (String) param.args[1]);
                     }
-                }
-            });
+                });
+            } else {
+                // 9.1.92: okhttp's validation strings moved to a class with no
+                // header writers; the two Spotify header-writing helpers are
+                // static 4-arg methods that receive the raw value directly.
+                var authWriters = bridge.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create().modifiers(Modifier.STATIC).paramCount(4).usingStrings("Bearer ")));
+                if (authWriters.isEmpty()) throw new IllegalStateException("No OkHttp header writers found");
+                for (var writer : authWriters) XposedBridge.hookMethod(writer.getMethodInstance(lpparm.classLoader), new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args[2] instanceof String) recordToken("authorization", (String) param.args[2]);
+                    }
+                });
+
+                var clientWriters = bridge.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create().modifiers(Modifier.STATIC).paramCount(4).usingStrings("client-token")));
+                for (var writer : clientWriters) XposedBridge.hookMethod(writer.getMethodInstance(lpparm.classLoader), new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args[2] instanceof String) recordToken("client-token", (String) param.args[2]);
+                    }
+                });
+            }
         } catch (Exception e) {
             XposedBridge.log(e);
+        }
+    }
+
+    private static void recordToken(String headerName, String headerValue) {
+        if (headerName != null && headerName.equalsIgnoreCase("authorization") && headerValue != null) {
+            String token = headerValue.regionMatches(true, 0, "Bearer ", 0, 7)
+                    ? headerValue.substring(7).trim()
+                    : headerValue.trim();
+            if (token.isEmpty()) return;
+            String accessToken = References.accessToken;
+            if (accessToken != null && !accessToken.isEmpty() && accessToken.equals(token)) return;
+            References.accessToken = token;
+        } else if (headerName != null && headerName.equalsIgnoreCase("client-token")
+                && headerValue != null && !headerValue.isBlank()) {
+            References.clientToken = headerValue.trim();
         }
     }
 

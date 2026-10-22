@@ -579,7 +579,11 @@ public class ThemeHook extends SpotifyHook {
 
     private void hookHomeShortcutCards() {
         try {
-            int shortcutLayoutId = resourceId("layout", "shortcut_card");
+            int shortcutLayoutId = resourceIdOrNull("layout", "shortcut_card");
+            if (shortcutLayoutId == 0) {
+                XposedBridge.log("[SpotifyPlus] layout/shortcut_card is removed in this Spotify version, skipping home shortcut tint");
+                return;
+            }
             int titleId = resourceId("id", "title");
             List<MethodData> shortcutConstructors = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().name("<init>").paramCount(4).usingNumbers(shortcutLayoutId)));
             for (MethodData shortcutConstructorData : shortcutConstructors) {
@@ -801,10 +805,13 @@ public class ThemeHook extends SpotifyHook {
 
     private void hookNativeAlbumGradientLayouts() {
         try {
-            int legacyLayout = resourceId("layout", "creative_work_header_layout");
+            int legacyLayout = resourceIdOrNull("layout", "creative_work_header_layout");
+            if (legacyLayout == 0) {
+                XposedBridge.log("[SpotifyPlus] layout/creative_work_header_layout is removed in this Spotify version, applying legacy gradient only to expanded/condensed headers");
+            }
             int expandedLayout = resourceId("layout", "expanded_header");
             int condensedLayout = resourceId("layout", "condensed_header");
-            int legacyBackground = resourceId("id", "artwork_background");
+            int legacyBackground = legacyLayout != 0 ? resourceId("id", "artwork_background") : 0;
             int modernBackground = resourceId("id", "cwp_header_artwork_background");
             XposedBridge.hookAllMethods(LayoutInflater.class, "inflate", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -1025,7 +1032,11 @@ public class ThemeHook extends SpotifyHook {
 
     private void hookSpotifyConnectColor() {
         try {
-            int connectLabelLayoutId = resourceId("layout", "connect_device_label");
+            int connectLabelLayoutId = resourceIdOrNull("layout", "connect_device_label");
+            if (connectLabelLayoutId == 0) {
+                XposedBridge.log("[SpotifyPlus] layout/connect_device_label is removed in this Spotify version, skipping connect label re-coloring");
+                return;
+            }
             int deviceNameId = resourceId("id", "connect_device_name");
             int deviceIconId = resourceId("id", "connect_device_icon");
             ClassData connectLabelClass = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().name("<init>").paramTypes(Context.class, AttributeSet.class, int.class).usingNumbers(connectLabelLayoutId))).single().getDeclaredClass();
@@ -1050,7 +1061,11 @@ public class ThemeHook extends SpotifyHook {
 
     private void hookCreativeWorkAlbumHeader() {
         try {
-            int headerLayoutId = resourceId("layout", "creative_work_header_layout");
+            int headerLayoutId = resourceIdOrNull("layout", "creative_work_header_layout");
+            if (headerLayoutId == 0) {
+                XposedBridge.log("[SpotifyPlus] layout/creative_work_header_layout is removed in this Spotify version, skipping legacy colored album header");
+                return;
+            }
             ClassData headerData = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().name("<init>").usingNumbers(headerLayoutId))).single().getDeclaredClass();
             Class<?> headerClass = headerData.getInstance(lpparm.classLoader);
             creativeWorkGetViewMethod = bridge.findMethod(FindMethod.create().searchInClass(Collections.singletonList(headerData)).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC).returnType(View.class).paramCount(0))).single().getMethodInstance(lpparm.classLoader);
@@ -1661,6 +1676,12 @@ public class ThemeHook extends SpotifyHook {
             Class<?> playerStateClass = XposedHelpers.findClass("com.spotify.player.model.PlayerState", lpparm.classLoader);
             Class<?> contextTrackClass = XposedHelpers.findClass("com.spotify.player.model.ContextTrack", lpparm.classLoader);
             var playerConsumerMethods = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().returnType(void.class).paramTypes(Object.class).usingStrings("image_url").declaredClass(ClassMatcher.create().fieldCount(2).addInterface("io.reactivex.rxjava3.functions.Consumer").addFieldForType(int.class))));
+            if (playerConsumerMethods.isEmpty()) {
+                // 9.1.92+: the lambda consumer was inlined into the media
+                // notification builder, which consumes typed PlayerState and
+                // reads image_url directly.
+                playerConsumerMethods = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().returnType(void.class).paramTypes("com.spotify.player.model.PlayerState").usingStrings("image_url")));
+            }
             if (playerConsumerMethods.isEmpty()) throw new IllegalStateException("[ThemeHook/DexKit] Could not find a two-field Rx Consumer that reads image_url from player state");
             XposedBridge.log("[SpotifyPlus] Auto-theme player-state consumers: " + playerConsumerMethods.stream().map(MethodData::getDescriptor).collect(java.util.stream.Collectors.joining(", ")));
             Set<String> hookedDescriptors = new HashSet<>();
@@ -2123,9 +2144,13 @@ public class ThemeHook extends SpotifyHook {
     }
 
     private int resourceId(String type, String name) {
-        int identifier = context.getResources().getIdentifier(name, type, context.getPackageName());
+        int identifier = resourceIdOrNull(type, name);
         if (identifier == 0) throw new IllegalStateException("Missing Spotify resource " + type + "/" + name);
         return identifier;
+    }
+
+    private int resourceIdOrNull(String type, String name) {
+        return context.getResources().getIdentifier(name, type, context.getPackageName());
     }
 
     private static List<Field> getInstanceFields(Class<?> type) {
