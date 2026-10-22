@@ -226,7 +226,13 @@ public class PrivateSessionHook extends SpotifyHook {
                     // mod is enabled should be a true value.
                     currentlyTrue = false;
                 }
-                if (!currentlyTrue) param.args[1] = buildBooleanValue(valueClass, true);
+                if (!currentlyTrue) {
+                    try {
+                        param.args[1] = buildBooleanValue(valueClass, true);
+                    } catch (Throwable e) {
+                        XposedBridge.log(e);
+                    }
+                }
             }
 
             @Override
