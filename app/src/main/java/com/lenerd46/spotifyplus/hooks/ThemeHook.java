@@ -658,17 +658,18 @@ public class ThemeHook extends SpotifyHook {
 
     private void patchHomeFilterChipColor() {
         try {
-            ClassData filterChipClass = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().usingStrings("HomeFilterChip").fieldCount(4))).single();
+            ClassData filterChipClass = bridge.findClass(FindClass.create().matcher(ClassMatcher.create().usingStrings("HomeFilterChip").fieldCount(4, 64))).single();
             List<FieldData> longFields = new ArrayList<>();
             for (FieldData field : filterChipClass.getFields()) {
                 if ("long".equals(field.getTypeName()) && Modifier.isStatic(field.getModifiers())) longFields.add(field);
             }
-            if (longFields.size() != 2) throw new IllegalStateException("Expected two Home filter-chip color fields, found " + longFields);
             if (patchModernHomeFilterChipStyle(filterChipClass)) {
                 hookModernHomeFilterChipRenderer(filterChipClass);
-            } else {
+            } else if (longFields.size() == 2) {
                 homeFilterChipColorField = longFields.get(1).getFieldInstance(lpparm.classLoader);
                 homeFilterChipColorField.setAccessible(true);
+            } else {
+                XposedBridge.log("[SpotifyPlus] Home filter-chip layout changed (" + longFields.size() + " static long fields), skipping chip color patch");
             }
         } catch (Throwable throwable) {
             XposedBridge.log(throwable);
@@ -723,7 +724,13 @@ public class ThemeHook extends SpotifyHook {
     }
 
     private void hookModernHomeFilterChipRenderer(ClassData filterChipClass) throws Throwable {
-        Method renderer = bridge.findMethod(FindMethod.create().searchInClass(Collections.singletonList(filterChipClass)).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.STATIC).returnType(void.class).paramCount(12).usingStrings("HomeFilterChip"))).single().getMethodInstance(lpparm.classLoader);
+        Method renderer = null;
+        try {
+            renderer = bridge.findMethod(FindMethod.create().searchInClass(Collections.singletonList(filterChipClass)).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.STATIC).returnType(void.class).paramCount(12).usingStrings("HomeFilterChip"))).single().getMethodInstance(lpparm.classLoader);
+        } catch (Throwable missing) {
+            // 9.1.92: the renderer gained two extra int parameters (13 total).
+            renderer = bridge.findMethod(FindMethod.create().searchInClass(Collections.singletonList(filterChipClass)).matcher(MethodMatcher.create().modifiers(Modifier.PUBLIC | Modifier.STATIC).returnType(void.class).paramCount(13).usingStrings("HomeFilterChip"))).single().getMethodInstance(lpparm.classLoader);
+        }
         XposedBridge.hookMethod(renderer, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
