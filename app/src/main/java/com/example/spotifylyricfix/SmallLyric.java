@@ -202,7 +202,6 @@ public class SmallLyric {
         npvActivity = activity;
         npvResumed = true;
         ensureHandler();
-        if (!"samsung".equals(pkg)) return;
         attachOverlay(activity);
         startTicker();
         tick();
@@ -237,13 +236,6 @@ public class SmallLyric {
 
     private static void tick() {
         if (overlay == null || !npvResumed) return;
-        if (!"samsung".equals(pkg)) {
-            try {
-                if (overlay.getVisibility() != View.GONE) overlay.setVisibility(View.GONE);
-            } catch (Throwable ignored) {
-            }
-            return;
-        }
         try {
             tickCount++;
             if (!anchored && tickCount % 4 == 0) tryReanchor();
@@ -447,13 +439,17 @@ public class SmallLyric {
         }
     }
 
-    // True if Plus's own NPV lyric views are on screen: yield to the original.
+    // True if Plus's own lyric display is on screen: yield to the original.
     private static boolean checkPlusNpvVisible() {
         try {
             Activity activity = npvActivity;
             if (activity == null) return false;
             View decor = activity.getWindow().getDecorView();
             if (decor == null) return false;
+            if (de.robv.android.xposed.XposedHelpers.classExists("com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook")) {
+                if (com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isOverlayShowing(activity)
+                        || com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isEmbeddedShowing()) return true;
+            }
             boolean found = findPlusNpvView(decor);
             if (found != plusVisible) {
                 XposedBridge.log(TAG + " Plus NPV visible=" + found);
