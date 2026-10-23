@@ -446,10 +446,8 @@ public class SmallLyric {
             if (activity == null) return false;
             View decor = activity.getWindow().getDecorView();
             if (decor == null) return false;
-            if (de.robv.android.xposed.XposedHelpers.classExists("com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook")) {
-                if (com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isOverlayShowing(activity)
-                        || com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isEmbeddedShowing()) return true;
-            }
+            if (com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isOverlayShowing(activity)
+                    || com.lenerd46.spotifyplus.hooks.BeautifulLyricsHook.isEmbeddedShowing()) return true;
             boolean found = findPlusNpvView(decor);
             if (found != plusVisible) {
                 XposedBridge.log(TAG + " Plus NPV visible=" + found);
